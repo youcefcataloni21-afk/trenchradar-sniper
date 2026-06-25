@@ -32,14 +32,26 @@ def parse_dollar_value(val_str):
     except:
         return 0
 
-def is_older_than_24h(row_text):
+def is_valid_age(row_text):
+    """Vérifie si le token a entre 24h et 7 jours (168h) d'existence"""
     match = re.search(r'(\d+)\s*([hdwy])', row_text)
     if match:
         val = int(match.group(1))
         unit = match.group(2)
-        if unit in ('d', 'w', 'y'):
-            return True
-        if unit == 'h' and val >= 24:
+        
+        # Convertir l'âge en heures
+        hours = 0
+        if unit == 'h':
+            hours = val
+        elif unit == 'd':
+            hours = val * 24
+        elif unit == 'w':
+            hours = val * 24 * 7
+        elif unit == 'y':
+            hours = val * 24 * 365
+            
+        # Le token doit avoir entre 24h et 168h (7 jours)
+        if 24 <= hours < 168:
             return True
     return False
 
@@ -64,14 +76,15 @@ async def get_new_solana_tokens(page):
                 token_rows.append(row)
 
     tokens = []
-    for row in token_rows[:50]:
+    for row in token_rows[:100]: # On scanne les 100 premiers pour trouver 15 bons tokens
         try:
             href = await row.get_attribute("href")
             if href and "/solana/" in href:
                 address = href.split("/solana/")[1].split("?")[0]
                 row_text = await row.inner_text()
                 
-                if not is_older_than_24h(row_text):
+                # FILTRE AGE : Entre 24h et 7 jours
+                if not is_valid_age(row_text):
                     continue
                     
                 text_parts = row_text.split('\n')
@@ -83,7 +96,7 @@ async def get_new_solana_tokens(page):
                     
                     if liq_val >= 20000 and mcap_val >= 100000:
                         name = text_parts[1] if len(text_parts) > 1 else "Unknown"
-                        print(f"    -> [GARDÉ >24h] {name} | Liq: ${liq_val:,.0f} | Mcap: ${mcap_val:,.0f}")
+                        print(f"    -> [GARDÉ 1-7j] {name} | Liq: ${liq_val:,.0f} | Mcap: ${mcap_val:,.0f}")
                         tokens.append({"name": name, "address": address})
                         if len(tokens) >= 15:
                             break 
@@ -97,15 +110,12 @@ async def get_trenchradar_score(page, address: str) -> int:
     
     captured_score = None
     
-    # Intercepteur d'API
     async def handle_response(response):
         nonlocal captured_score
         if response.request.resource_type in ["xhr", "fetch"]:
             try:
                 body = await response.text()
-                # Si l'API renvoie l'adresse du token ou un champ de score
                 if address.lower() in body.lower() or "trust_score" in body.lower() or "score" in body.lower():
-                    # On cherche le score (ex: "trust_score": 85 ou "score": 85)
                     match = re.search(r'"(?:trust_)?score":\s*"?(\d{1,3})"?', body, re.IGNORECASE)
                     if match:
                         captured_score = int(match.group(1))
@@ -117,7 +127,6 @@ async def get_trenchradar_score(page, address: str) -> int:
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=60000)
         
-        # Trouver la barre de recherche et taper l'adresse
         search_input = await page.wait_for_selector(
             "input[type='text'], input[type='search'], input[placeholder*='search' i], input[placeholder*='address' i]",
             timeout=15000
@@ -128,27 +137,22 @@ async def get_trenchradar_score(page, address: str) -> int:
             await page.keyboard.press("Enter")
             
             print("    -> Waiting for TrenchRadar to calculate score...")
-            # On attend que l'API soit interceptée ou que le texte apparaisse
             await asyncio.sleep(10) 
             
         page.remove_listener("response", handle_response)
         
-        # Si l'API a été interceptée
         if captured_score is not None:
             print(f"    -> Score (API) trouvé: {captured_score}/100")
             return captured_score
             
-        # Sinon, on lit le texte de la page
         body_text = await page.evaluate("document.body.innerText")
         
-        # Fallback 1 : "35 \n Trust Score"
         match = re.search(r'(\d{1,3})\s*\n*Trust Score', body_text, re.IGNORECASE)
         if match:
             score = int(match.group(1))
             print(f"    -> Score (Texte) trouvé: {score}/100")
             return score
             
-        # Fallback 2 : "35/100"
         match_fallback = re.search(r'(\d{1,3})\s*/\s*100', body_text)
         if match_fallback:
             print(f"    -> Score (Fallback) trouvé: {match_fallback.group(1)}/100")
@@ -203,13 +207,13 @@ async def main():
             score = await get_trenchradar_score(tr_page, token['address'])
             if score >= SCORE_THRESHOLD:
                 found_good_coin = True
-                message = f"🚀 <b>High Score Token Trouvé !</b>\n\nName: <b>{token['name']}</b>\nAddress: <code>{token['address']}</code>\n\nRésultat: Trust Score >= 75/100 sur TrenchRadar"
+                message = f"🚀 <b>High Score Token Trouvé !</b>\n\nName: <b>{token['name']}</b>\nAddress: <code>{token['address']}</code>\n\nRésultat: Trust Score >= 70/100 sur TrenchRadar"
                 await send_telegram_message(message)
             
             await asyncio.sleep(3)
             
         if not found_good_coin:
-            print("[-] Aucun token n'a eu un score >= 75 cette fois.")
+            print("[-] Aucun token n'a eu un score >= 70 cette fois.")
             
         await chr_browser.close()
         print("✅ Agent finished task.")
