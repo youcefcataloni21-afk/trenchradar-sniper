@@ -33,6 +33,7 @@ def parse_dollar_value(val_str):
         return 0
 
 def get_age_hours(row_text):
+    # On cherche un motif comme "5h", "2d", "1w"
     match = re.search(r'(\d+)\s*([hdwy])', row_text)
     if match:
         val = int(match.group(1))
@@ -44,9 +45,9 @@ def get_age_hours(row_text):
     return 0
 
 async def get_new_solana_tokens(page):
-    print("[*] Scraping DexScreener (Newest & Pair Age)...")
-    # On trie par les nouveaux tokens
-    await page.goto("https://dexscreener.com/new-pairs/solana", wait_until="domcontentloaded", timeout=30000)
+    print("[*] Scraping DexScreener (Newest / Age Ascending)...")
+    # NOUVEAU : On trie par Âge ascendant (du plus récent au plus ancien)
+    await page.goto("https://dexscreener.com/solana?rank=age&order=asc", wait_until="domcontentloaded", timeout=30000)
     await asyncio.sleep(5)
     
     tokens = []
@@ -55,7 +56,7 @@ async def get_new_solana_tokens(page):
     stable_scrolls = 0
     
     print("[*] Scroll et collecte avec TOUS les filtres (Age 24h-7j, Finances, Profil)...")
-    for scroll_count in range(100): # On descend jusqu'à 100 fois
+    for scroll_count in range(100):
         rows = await page.query_selector_all("a[href*='/solana/']")
         
         for row in rows:
@@ -70,9 +71,9 @@ async def get_new_solana_tokens(page):
                         row_text = await row.inner_text()
                         age_hours = get_age_hours(row_text)
                         
-                        # FILTRE 1 : L'Âge (Newest / Pair Age)
-                        # Si le token a plus de 7 jours (168h), la page est triée par nouveauté,
-                        # donc tout ce qui suit sera encore plus vieux. On arrête tout !
+                        # FILTRE 1 : L'Âge
+                        # Si le token a plus de 7 jours (168h), comme la page est triée du plus récent au plus vieux,
+                        # tout ce qui suit sera encore plus vieux. On arrête tout !
                         if age_hours > 168:
                             print("[*] Token de plus de 7 jours atteint. Arrêt de la recherche.")
                             return tokens
@@ -105,7 +106,7 @@ async def get_new_solana_tokens(page):
             except:
                 continue
                 
-        if len(tokens) >= 200: # Limite de sécurité pour ne pas bloquer GitHub
+        if len(tokens) >= 50:
             break
             
         # Sécurité si la page ne défile plus
@@ -149,95 +150,4 @@ async def get_trenchradar_score(page, address: str) -> int:
         await page.goto(url, wait_until="domcontentloaded", timeout=60000)
         
         search_input = await page.wait_for_selector(
-            "input[type='text'], input[type='search'], input[placeholder*='search' i], input[placeholder*='address' i]",
-            timeout=15000
-        )
-        
-        if search_input:
-            await search_input.fill(address)
-            await page.keyboard.press("Enter")
-            
-            print("    -> Waiting for TrenchRadar to calculate score...")
-            await asyncio.sleep(10) 
-            
-        page.remove_listener("response", handle_response)
-        
-        if captured_score is not None:
-            print(f"    -> Score (API) trouvé: {captured_score}/100")
-            return captured_score
-            
-        body_text = await page.evaluate("document.body.innerText")
-        
-        match = re.search(r'(\d{1,3})\s*\n*Trust Score', body_text, re.IGNORECASE)
-        if match:
-            score = int(match.group(1))
-            print(f"    -> Score (Texte) trouvé: {score}/100")
-            return score
-            
-        match_fallback = re.search(r'(\d{1,3})\s*/\s*100', body_text)
-        if match_fallback:
-            print(f"    -> Score (Fallback) trouvé: {match_fallback.group(1)}/100")
-            return int(match_fallback.group(1))
-            
-        print(f"    -> Score non trouvé.")
-        return 0
-            
-    except Exception as e:
-        page.remove_listener("response", handle_response)
-        print(f"    -> Error scraping TrenchRadar: {e}")
-        return 0
-
-async def main():
-    delay = random.uniform(1, 5)
-    print(f"[*] Waiting for {delay:.2f} seconds...")
-    await asyncio.sleep(delay)
-
-    async with async_playwright() as p:
-        # 1. Firefox pour DexScreener
-        print("[*] Lancement de Firefox pour DexScreener...")
-        ff_browser = await p.firefox.launch(headless=True)
-        ff_context = await ff_browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
-            viewport={'width': 1920, 'height': 1080},
-            locale='en-US'
-        )
-        dex_page = await ff_context.new_page()
-        await dex_page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        
-        tokens = await get_new_solana_tokens(dex_page)
-        await ff_browser.close()
-        
-        if not tokens:
-            print("[-] Aucun token trouvé.")
-            return
-
-        # 2. Chromium pour TrenchRadar
-        print("[*] Lancement de Chromium pour TrenchRadar...")
-        chr_browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
-        chr_context = await chr_browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={'width': 1920, 'height': 1080},
-            locale='en-US'
-        )
-        tr_page = await chr_context.new_page()
-
-        print("🤖 Agent starting up...")
-        
-        found_good_coin = False
-        for token in tokens:
-            score = await get_trenchradar_score(tr_page, token['address'])
-            if score >= SCORE_THRESHOLD:
-                found_good_coin = True
-                message = f"🚀 <b>High Score Token Trouvé !</b>\n\nName: <b>{token['name']}</b>\nAddress: <code>{token['address']}</code>\n\nRésultat: Trust Score >= 70/100 sur TrenchRadar"
-                await send_telegram_message(message)
-            
-            await asyncio.sleep(3)
-            
-        if not found_good_coin:
-            print("[-] Aucun token n'a eu un score >= 70 cette fois.")
-            
-        await chr_browser.close()
-        print("✅ Agent finished task.")
-
-if __name__ == "__main__":
-    asyncio.run(main())
+            "input[type='text'], input[type
