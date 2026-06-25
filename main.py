@@ -33,22 +33,18 @@ def parse_dollar_value(val_str):
         return 0
 
 def is_valid_age(row_text):
-    """Vérifie si le token a entre 24h et 7 jours (168h) d'existence"""
     match = re.search(r'(\d+)\s*([hdwy])', row_text)
     if match:
         val = int(match.group(1))
         unit = match.group(2)
         
         hours = 0
-        if unit == 'h':
-            hours = val
-        elif unit == 'd':
-            hours = val * 24
-        elif unit == 'w':
-            hours = val * 24 * 7
-        elif unit == 'y':
-            hours = val * 24 * 365
+        if unit == 'h': hours = val
+        elif unit == 'd': hours = val * 24
+        elif unit == 'w': hours = val * 24 * 7
+        elif unit == 'y': hours = val * 24 * 365
             
+        # Entre 24h (inclus) et 168h (7 jours, exclus)
         if 24 <= hours < 168:
             return True
     return False
@@ -58,57 +54,50 @@ async def get_new_solana_tokens(page):
     await page.goto("https://dexscreener.com/solana", wait_until="domcontentloaded", timeout=30000)
     await asyncio.sleep(5)
     
-    # NOUVEAU : Descendre sur la page pour charger plus de tokens
-    print("[*] Scroll de la page pour charger plus de tokens...")
-    for _ in range(5):
-        await page.evaluate("window.scrollBy(0, 3000)")
-        await asyncio.sleep(2)
-    
-    try:
-        await page.wait_for_selector("a[href*='/solana/']", timeout=20000)
-    except:
-        print("[-] DexScreener bloqué ou layout changé.")
-        return []
-
-    all_links = await page.query_selector_all("a[href*='/solana/']")
-    token_rows = []
-    for row in all_links:
-        href = await row.get_attribute("href")
-        if href:
-            address = href.split("/solana/")[1].split("?")[0]
-            if len(address) >= 32:
-                token_rows.append(row)
-
     tokens = []
-    print(f"[*] Analyse de {len(token_rows)} tokens trouvés sur la page...")
+    seen_addresses = set()
     
-    for row in token_rows[:300]: # ON SCANNE JUSQU'À 300 TOKENS
-        try:
-            href = await row.get_attribute("href")
-            if href and "/solana/" in href:
-                address = href.split("/solana/")[1].split("?")[0]
-                row_text = await row.inner_text()
-                
-                # FILTRE AGE : Entre 24h et 7 jours
-                if not is_valid_age(row_text):
-                    continue
+    print("[*] Scroll de la page et collecte des tokens...")
+    # On va descendre petit à petit et sauvegarder les tokens au fur et à mesure
+    for scroll_count in range(20): # On descend 20 fois
+        rows = await page.query_selector_all("a[href*='/solana/']")
+        
+        for row in rows:
+            try:
+                href = await row.get_attribute("href")
+                if href and "/solana/" in href:
+                    address = href.split("/solana/")[1].split("?")[0]
                     
-                text_parts = row_text.split('\n')
-                # CORRECTION : On prend tous les textes qui commencent par '$' sans limite de longueur
-                dollar_strings = [s for s in text_parts if s.startswith('$') and s != '$']
+                    # Si on a déjà vu ce token, on passe au suivant
+                    if len(address) >= 32 and address not in seen_addresses:
+                        seen_addresses.add(address)
+                        
+                        row_text = await row.inner_text()
+                        
+                        if is_valid_age(row_text):
+                            text_parts = row_text.split('\n')
+                            dollar_strings = [s for s in text_parts if s.startswith('$') and s != '$']
+                            
+                            if len(dollar_strings) >= 2:
+                                liq_val = parse_dollar_value(dollar_strings[-2])
+                                mcap_val = parse_dollar_value(dollar_strings[-1])
+                                
+                                if liq_val >= 20000 and mcap_val >= 100000:
+                                    name = text_parts[1] if len(text_parts) > 1 else "Unknown"
+                                    print(f"    -> [GARDÉ 1-7j] {name} | Liq: ${liq_val:,.0f} | Mcap: ${mcap_val:,.0f}")
+                                    tokens.append({"name": name, "address": address})
+            except:
+                continue
                 
-                if len(dollar_strings) >= 2:
-                    liq_val = parse_dollar_value(dollar_strings[-2])
-                    mcap_val = parse_dollar_value(dollar_strings[-1])
-                    
-                    if liq_val >= 20000 and mcap_val >= 100000:
-                        name = text_parts[1] if len(text_parts) > 1 else "Unknown"
-                        print(f"    -> [GARDÉ 1-7j] {name} | Liq: ${liq_val:,.0f} | Mcap: ${mcap_val:,.0f}")
-                        tokens.append({"name": name, "address": address})
-                        if len(tokens) >= 30: # On garde jusqu'à 30 tokens valides
-                            break 
-        except:
-            continue
+        # Si on a trouvé assez de tokens, on arrête de scroller
+        if len(tokens) >= 50:
+            break
+            
+        # Descendre sur la page
+        await page.evaluate("window.scrollBy(0, 1500)")
+        await asyncio.sleep(1.5)
+
+    print(f"[+] Found {len(tokens)} tokens valides au total.")
     return tokens
 
 async def get_trenchradar_score(page, address: str) -> int:
