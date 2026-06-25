@@ -2,7 +2,8 @@ name: TrenchRadar Sniper Agent
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    # Runs every 60 minutes
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 jobs:
