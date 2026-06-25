@@ -39,7 +39,6 @@ def is_valid_age(row_text):
         val = int(match.group(1))
         unit = match.group(2)
         
-        # Convertir l'âge en heures
         hours = 0
         if unit == 'h':
             hours = val
@@ -50,7 +49,6 @@ def is_valid_age(row_text):
         elif unit == 'y':
             hours = val * 24 * 365
             
-        # Le token doit avoir entre 24h et 168h (7 jours)
         if 24 <= hours < 168:
             return True
     return False
@@ -59,6 +57,12 @@ async def get_new_solana_tokens(page):
     print("[*] Scraping DexScreener (Firefox)...")
     await page.goto("https://dexscreener.com/solana", wait_until="domcontentloaded", timeout=30000)
     await asyncio.sleep(5)
+    
+    # NOUVEAU : Descendre sur la page pour charger plus de tokens
+    print("[*] Scroll de la page pour charger plus de tokens...")
+    for _ in range(5):
+        await page.evaluate("window.scrollBy(0, 3000)")
+        await asyncio.sleep(2)
     
     try:
         await page.wait_for_selector("a[href*='/solana/']", timeout=20000)
@@ -76,7 +80,9 @@ async def get_new_solana_tokens(page):
                 token_rows.append(row)
 
     tokens = []
-    for row in token_rows[:100]: # On scanne les 100 premiers pour trouver 15 bons tokens
+    print(f"[*] Analyse de {len(token_rows)} tokens trouvés sur la page...")
+    
+    for row in token_rows[:300]: # ON SCANNE JUSQU'À 300 TOKENS
         try:
             href = await row.get_attribute("href")
             if href and "/solana/" in href:
@@ -88,7 +94,8 @@ async def get_new_solana_tokens(page):
                     continue
                     
                 text_parts = row_text.split('\n')
-                dollar_strings = [s for s in text_parts if '$' in s and len(s) < 15]
+                # CORRECTION : On prend tous les textes qui commencent par '$' sans limite de longueur
+                dollar_strings = [s for s in text_parts if s.startswith('$') and s != '$']
                 
                 if len(dollar_strings) >= 2:
                     liq_val = parse_dollar_value(dollar_strings[-2])
@@ -98,7 +105,7 @@ async def get_new_solana_tokens(page):
                         name = text_parts[1] if len(text_parts) > 1 else "Unknown"
                         print(f"    -> [GARDÉ 1-7j] {name} | Liq: ${liq_val:,.0f} | Mcap: ${mcap_val:,.0f}")
                         tokens.append({"name": name, "address": address})
-                        if len(tokens) >= 15:
+                        if len(tokens) >= 30: # On garde jusqu'à 30 tokens valides
                             break 
         except:
             continue
