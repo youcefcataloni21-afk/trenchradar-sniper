@@ -32,25 +32,21 @@ def parse_dollar_value(val_str):
     except:
         return 0
 
-def is_valid_age(row_text):
+def get_age_hours(row_text):
     match = re.search(r'(\d+)\s*([hdwy])', row_text)
     if match:
         val = int(match.group(1))
         unit = match.group(2)
-        
-        hours = 0
-        if unit == 'h': hours = val
-        elif unit == 'd': hours = val * 24
-        elif unit == 'w': hours = val * 24 * 7
-        elif unit == 'y': hours = val * 24 * 365
-            
-        if 24 <= hours < 168:
-            return True
-    return False
+        if unit == 'h': return val
+        elif unit == 'd': return val * 24
+        elif unit == 'w': return val * 24 * 7
+        elif unit == 'y': return val * 24 * 365
+    return 0
 
 async def get_new_solana_tokens(page):
-    print("[*] Scraping DexScreener (Firefox)...")
-    await page.goto("https://dexscreener.com/solana", wait_until="domcontentloaded", timeout=30000)
+    print("[*] Scraping DexScreener (Newest & Pair Age)...")
+    # On trie par les nouveaux tokens
+    await page.goto("https://dexscreener.com/new-pairs/solana", wait_until="domcontentloaded", timeout=30000)
     await asyncio.sleep(5)
     
     tokens = []
@@ -58,8 +54,8 @@ async def get_new_solana_tokens(page):
     last_count = 0
     stable_scrolls = 0
     
-    print("[*] Scroll de la page et collecte des tokens...")
-    for scroll_count in range(30): # On descend jusqu'à 30 fois
+    print("[*] Scroll et collecte avec TOUS les filtres (Age 24h-7j, Finances, Profil)...")
+    for scroll_count in range(100): # On descend jusqu'à 100 fois
         rows = await page.query_selector_all("a[href*='/solana/']")
         
         for row in rows:
@@ -68,42 +64,60 @@ async def get_new_solana_tokens(page):
                 if href and "/solana/" in href:
                     address = href.split("/solana/")[1].split("?")[0]
                     
-                    # Si on n'a pas déjà vu ce token, on l'analyse
                     if len(address) >= 32 and address not in seen_addresses:
                         seen_addresses.add(address)
                         
                         row_text = await row.inner_text()
+                        age_hours = get_age_hours(row_text)
                         
-                        if is_valid_age(row_text):
-                            text_parts = row_text.split('\n')
-                            dollar_strings = [s for s in text_parts if s.startswith('$') and len(s) > 1]
+                        # FILTRE 1 : L'Âge (Newest / Pair Age)
+                        # Si le token a plus de 7 jours (168h), la page est triée par nouveauté,
+                        # donc tout ce qui suit sera encore plus vieux. On arrête tout !
+                        if age_hours > 168:
+                            print("[*] Token de plus de 7 jours atteint. Arrêt de la recherche.")
+                            return tokens
                             
-                            if len(dollar_strings) >= 2:
-                                liq_val = parse_dollar_value(dollar_strings[-2])
-                                mcap_val = parse_dollar_value(dollar_strings[-1])
-                                
-                                if liq_val >= 20000 and mcap_val >= 100000:
+                        # Si le token a moins de 24h, on l'ignore pour l'instant
+                        if age_hours < 24:
+                            continue
+                            
+                        text_parts = row_text.split('\n')
+                        dollar_strings = [s for s in text_parts if s.startswith('$') and len(s) > 1]
+                        
+                        # FILTRE 2 : Finances
+                        if len(dollar_strings) >= 2:
+                            liq_val = parse_dollar_value(dollar_strings[-2])
+                            mcap_val = parse_dollar_value(dollar_strings[-1])
+                            
+                            if liq_val >= 20000 and mcap_val >= 100000:
+                                # FILTRE 3 : Profil (Twitter, Telegram, Website)
+                                links = await row.eval_on_selector_all('a', '(elements) => elements.map(e => e.href)')
+                                has_socials = False
+                                for link in links:
+                                    if 'twitter.com' in link or 'x.com' in link or 't.me' in link or 'telegram.me' in link or ('http' in link and 'dexscreener.com' not in link and 'solscan.io' not in link and 'solana.fm' not in link and 'pump.fun' not in link):
+                                        has_socials = True
+                                        break
+                                        
+                                if has_socials:
                                     name = text_parts[1] if len(text_parts) > 1 else "Unknown"
-                                    print(f"    -> [GARDÉ 1-7j] {name} | Liq: ${liq_val:,.0f} | Mcap: ${mcap_val:,.0f}")
+                                    print(f"    -> [GARDÉ 1-7j] {name} | Liq: ${liq_val:,.0f} | Mcap: ${mcap_val:,.0f} | Profil: Oui")
                                     tokens.append({"name": name, "address": address})
             except:
                 continue
                 
-        # Si on a trouvé 50 tokens, on arrête
-        if len(tokens) >= 50:
+        if len(tokens) >= 200: # Limite de sécurité pour ne pas bloquer GitHub
             break
             
-        # Si on n'a trouvé aucun nouveau token lors des 5 derniers scrolls, on arrête
+        # Sécurité si la page ne défile plus
         if len(seen_addresses) == last_count:
             stable_scrolls += 1
-            if stable_scrolls > 5:
+            if stable_scrolls > 15:
                 print("[*] Fin de la page atteinte.")
                 break
         else:
             stable_scrolls = 0
         last_count = len(seen_addresses)
         
-        # Descendre sur la page
         await page.evaluate("window.scrollBy(0, 2000)")
         await asyncio.sleep(1.5)
 
