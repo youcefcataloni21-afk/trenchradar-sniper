@@ -7,6 +7,18 @@ import re
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+SCORE_THRESHOLD = 75
+
+async def send_telegram_message(message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
+    try:
+        requests.post(url, json=payload, timeout=10)
+        print("[+] Message Telegram envoyé.")
+    except:
+        pass
 
 def parse_dollar_value(val_str):
     try:
@@ -39,6 +51,7 @@ async def get_new_solana_tokens(page):
     try:
         await page.wait_for_selector("a[href*='/solana/']", timeout=20000)
     except:
+        print("[-] DexScreener bloqué ou layout changé.")
         return []
 
     all_links = await page.query_selector_all("a[href*='/solana/']")
@@ -70,14 +83,90 @@ async def get_new_solana_tokens(page):
                     
                     if liq_val >= 20000 and mcap_val >= 100000:
                         name = text_parts[1] if len(text_parts) > 1 else "Unknown"
+                        print(f"    -> [GARDÉ >24h] {name} | Liq: ${liq_val:,.0f} | Mcap: ${mcap_val:,.0f}")
                         tokens.append({"name": name, "address": address})
-                        if len(tokens) >= 1: # Juste 1 pour le test
+                        if len(tokens) >= 15:
                             break 
         except:
             continue
     return tokens
 
+async def get_trenchradar_score(page, address: str) -> int:
+    print(f"[*] Checking TrenchRadar for {address[:8]}...")
+    url = "https://www.trenchradar.net/app?chain=solana"
+    
+    captured_score = None
+    
+    # Intercepteur d'API
+    async def handle_response(response):
+        nonlocal captured_score
+        if response.request.resource_type in ["xhr", "fetch"]:
+            try:
+                body = await response.text()
+                # Si l'API renvoie l'adresse du token ou un champ de score
+                if address.lower() in body.lower() or "trust_score" in body.lower() or "score" in body.lower():
+                    # On cherche le score (ex: "trust_score": 85 ou "score": 85)
+                    match = re.search(r'"(?:trust_)?score":\s*"?(\d{1,3})"?', body, re.IGNORECASE)
+                    if match:
+                        captured_score = int(match.group(1))
+            except:
+                pass
+
+    page.on("response", handle_response)
+
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        
+        # Trouver la barre de recherche et taper l'adresse
+        search_input = await page.wait_for_selector(
+            "input[type='text'], input[type='search'], input[placeholder*='search' i], input[placeholder*='address' i]",
+            timeout=15000
+        )
+        
+        if search_input:
+            await search_input.fill(address)
+            await page.keyboard.press("Enter")
+            
+            print("    -> Waiting for TrenchRadar to calculate score...")
+            # On attend que l'API soit interceptée ou que le texte apparaisse
+            await asyncio.sleep(10) 
+            
+        page.remove_listener("response", handle_response)
+        
+        # Si l'API a été interceptée
+        if captured_score is not None:
+            print(f"    -> Score (API) trouvé: {captured_score}/100")
+            return captured_score
+            
+        # Sinon, on lit le texte de la page
+        body_text = await page.evaluate("document.body.innerText")
+        
+        # Fallback 1 : "35 \n Trust Score"
+        match = re.search(r'(\d{1,3})\s*\n*Trust Score', body_text, re.IGNORECASE)
+        if match:
+            score = int(match.group(1))
+            print(f"    -> Score (Texte) trouvé: {score}/100")
+            return score
+            
+        # Fallback 2 : "35/100"
+        match_fallback = re.search(r'(\d{1,3})\s*/\s*100', body_text)
+        if match_fallback:
+            print(f"    -> Score (Fallback) trouvé: {match_fallback.group(1)}/100")
+            return int(match_fallback.group(1))
+            
+        print(f"    -> Score non trouvé.")
+        return 0
+            
+    except Exception as e:
+        page.remove_listener("response", handle_response)
+        print(f"    -> Error scraping TrenchRadar: {e}")
+        return 0
+
 async def main():
+    delay = random.uniform(1, 5)
+    print(f"[*] Waiting for {delay:.2f} seconds...")
+    await asyncio.sleep(delay)
+
     async with async_playwright() as p:
         # 1. Firefox pour DexScreener
         print("[*] Lancement de Firefox pour DexScreener...")
@@ -97,58 +186,33 @@ async def main():
             print("[-] Aucun token trouvé.")
             return
 
-        token = tokens[0]
-        print(f"[*] Test TrenchRadar pour {token['name']} ({token['address'][:8]}...)")
-
         # 2. Chromium pour TrenchRadar
+        print("[*] Lancement de Chromium pour TrenchRadar...")
         chr_browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
         chr_context = await chr_browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             viewport={'width': 1920, 'height': 1080},
             locale='en-US'
         )
-        page = await chr_context.new_page()
+        tr_page = await chr_context.new_page()
 
-        try:
-            url = "https://www.trenchradar.net/app?chain=solana"
-            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        print("🤖 Agent starting up...")
+        
+        found_good_coin = False
+        for token in tokens:
+            score = await get_trenchradar_score(tr_page, token['address'])
+            if score >= SCORE_THRESHOLD:
+                found_good_coin = True
+                message = f"🚀 <b>High Score Token Trouvé !</b>\n\nName: <b>{token['name']}</b>\nAddress: <code>{token['address']}</code>\n\nRésultat: Trust Score >= 75/100 sur TrenchRadar"
+                await send_telegram_message(message)
             
-            search_input = await page.wait_for_selector(
-                "input[type='text'], input[type='search'], input[placeholder*='search' i], input[placeholder*='address' i]",
-                timeout=15000
-            )
+            await asyncio.sleep(3)
             
-            if search_input:
-                await search_input.fill(token['address'])
-                await page.keyboard.press("Enter")
-                
-                print("    -> Waiting for TrenchRadar to calculate score...")
-                try:
-                    await page.wait_for_function(
-                        """() => document.body.innerText.includes('Trust Score')""",
-                        timeout=30000
-                    )
-                except:
-                    print("    -> 'Trust Score' text did not appear in time.")
-                    
-                # Lire le texte de la page
-                body_text = await page.evaluate("document.body.innerText")
-                
-                # NOUVEAU : Afficher 500 caractères autour de "Trust Score"
-                score_index = body_text.find("Trust Score")
-                if score_index != -1:
-                    print(f"\n--- CONTEXTE AUTOUR DE 'TRUST SCORE' ---")
-                    print(body_text[max(0, score_index-200):score_index+300])
-                    print("----------------------------------------\n")
-                else:
-                    print("\n--- TEXTE DE LA PAGE (1000 chars) ---")
-                    print(body_text[:1000])
-                    print("-------------------------------------\n")
-                
-        except Exception as e:
-            print(f"Error: {e}")
+        if not found_good_coin:
+            print("[-] Aucun token n'a eu un score >= 75 cette fois.")
             
         await chr_browser.close()
+        print("✅ Agent finished task.")
 
 if __name__ == "__main__":
     asyncio.run(main())
