@@ -44,7 +44,6 @@ def is_valid_age(row_text):
         elif unit == 'w': hours = val * 24 * 7
         elif unit == 'y': hours = val * 24 * 365
             
-        # Entre 24h (inclus) et 168h (7 jours, exclus)
         if 24 <= hours < 168:
             return True
     return False
@@ -56,10 +55,11 @@ async def get_new_solana_tokens(page):
     
     tokens = []
     seen_addresses = set()
+    last_count = 0
+    stable_scrolls = 0
     
     print("[*] Scroll de la page et collecte des tokens...")
-    # On va descendre petit à petit et sauvegarder les tokens au fur et à mesure
-    for scroll_count in range(20): # On descend 20 fois
+    for scroll_count in range(30): # On descend jusqu'à 30 fois
         rows = await page.query_selector_all("a[href*='/solana/']")
         
         for row in rows:
@@ -68,7 +68,7 @@ async def get_new_solana_tokens(page):
                 if href and "/solana/" in href:
                     address = href.split("/solana/")[1].split("?")[0]
                     
-                    # Si on a déjà vu ce token, on passe au suivant
+                    # Si on n'a pas déjà vu ce token, on l'analyse
                     if len(address) >= 32 and address not in seen_addresses:
                         seen_addresses.add(address)
                         
@@ -76,7 +76,7 @@ async def get_new_solana_tokens(page):
                         
                         if is_valid_age(row_text):
                             text_parts = row_text.split('\n')
-                            dollar_strings = [s for s in text_parts if s.startswith('$') and s != '$']
+                            dollar_strings = [s for s in text_parts if s.startswith('$') and len(s) > 1]
                             
                             if len(dollar_strings) >= 2:
                                 liq_val = parse_dollar_value(dollar_strings[-2])
@@ -89,14 +89,25 @@ async def get_new_solana_tokens(page):
             except:
                 continue
                 
-        # Si on a trouvé assez de tokens, on arrête de scroller
+        # Si on a trouvé 50 tokens, on arrête
         if len(tokens) >= 50:
             break
             
+        # Si on n'a trouvé aucun nouveau token lors des 5 derniers scrolls, on arrête
+        if len(seen_addresses) == last_count:
+            stable_scrolls += 1
+            if stable_scrolls > 5:
+                print("[*] Fin de la page atteinte.")
+                break
+        else:
+            stable_scrolls = 0
+        last_count = len(seen_addresses)
+        
         # Descendre sur la page
-        await page.evaluate("window.scrollBy(0, 1500)")
+        await page.evaluate("window.scrollBy(0, 2000)")
         await asyncio.sleep(1.5)
 
+    print(f"[+] Total tokens uniques vus: {len(seen_addresses)}")
     print(f"[+] Found {len(tokens)} tokens valides au total.")
     return tokens
 
