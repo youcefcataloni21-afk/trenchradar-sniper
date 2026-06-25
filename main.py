@@ -56,7 +56,7 @@ async def get_new_solana_tokens(page):
     last_count = 0
     stable_scrolls = 0
     
-    print("[*] Scroll et collecte avec TOUS les filtres...")
+    print("[*] Scroll et collecte (Filtres: Age 24h-7j, Finances)...")
     for scroll_count in range(100):
         rows = await page.query_selector_all("a[href*='/solana/']")
         
@@ -72,30 +72,20 @@ async def get_new_solana_tokens(page):
                         row_text = await row.inner_text()
                         age_hours = get_age_hours(row_text)
                         
+                        # FILTRE 1 : L'Âge (entre 24h et 7 jours)
                         if 24 <= age_hours <= 168:
                             text_parts = row_text.split('\n')
                             dollar_strings = [s for s in text_parts if s.startswith('$') and len(s) > 1]
                             
+                            # FILTRE 2 : Finances
                             if len(dollar_strings) >= 2:
                                 liq_val = parse_dollar_value(dollar_strings[-2])
                                 mcap_val = parse_dollar_value(dollar_strings[-1])
                                 
                                 if liq_val >= 20000 and mcap_val >= 100000:
-                                    links = await row.eval_on_selector_all('a', '(elements) => elements.map(e => e.href)')
-                                    has_socials = False
-                                    for link in links:
-                                        if 'twitter.com' in link or 'x.com' in link or 't.me' in link or 'telegram.me' in link or ('http' in link and 'dexscreener.com' not in link and 'solscan.io' not in link and 'solana.fm' not in link and 'pump.fun' not in link):
-                                            has_socials = True
-                                            break
-                                            
-                                    if has_socials:
-                                        name = text_parts[1] if len(text_parts) > 1 else "Unknown"
-                                        print(f"    -> [GARDÉ 1-7j] {name} | Liq: ${liq_val:,.0f} | Mcap: ${mcap_val:,.0f}")
-                                        tokens.append({"name": name, "address": address})
-                                    else:
-                                        # NOUVEAU : On affiche les liens trouvés pour comprendre
-                                        name = text_parts[1] if len(text_parts) > 1 else "Unknown"
-                                        print(f"    -> [REJETÉ Profil] {name} | Liens trouvés: {links}")
+                                    name = text_parts[1] if len(text_parts) > 1 else "Unknown"
+                                    print(f"    -> [GARDÉ 1-7j] {name} | Liq: ${liq_val:,.0f} | Mcap: ${mcap_val:,.0f}")
+                                    tokens.append({"name": name, "address": address})
             except:
                 continue
                 
