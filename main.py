@@ -33,8 +33,6 @@ def parse_dollar_value(val_str):
         return 0
 
 def get_age_hours(row_text):
-    # CORRECTION MAJEURE : On lit l'âge uniquement si c'est un mot seul (ex: "15h", "2d")
-    # Cela évite de confondre avec "24h volume"
     text_parts = row_text.split('\n')
     for part in text_parts:
         part = part.strip()
@@ -49,8 +47,9 @@ def get_age_hours(row_text):
     return 0
 
 async def get_new_solana_tokens(page):
-    print("[*] Scraping DexScreener (Newest / Age Ascending)...")
-    await page.goto("https://dexscreener.com/solana?rank=age&order=asc", wait_until="domcontentloaded", timeout=30000)
+    print("[*] Scraping DexScreener (Firefox)...")
+    # On revient à la page principale
+    await page.goto("https://dexscreener.com/solana", wait_until="domcontentloaded", timeout=30000)
     await asyncio.sleep(5)
     
     tokens = []
@@ -58,7 +57,7 @@ async def get_new_solana_tokens(page):
     last_count = 0
     stable_scrolls = 0
     
-    print("[*] Scroll et collecte avec TOUS les filtres (Age 24h-7j, Finances, Profil)...")
+    print("[*] Scroll et collecte avec TOUS les filtres...")
     for scroll_count in range(100):
         rows = await page.query_selector_all("a[href*='/solana/']")
         
@@ -97,6 +96,14 @@ async def get_new_solana_tokens(page):
                                         name = text_parts[1] if len(text_parts) > 1 else "Unknown"
                                         print(f"    -> [GARDÉ 1-7j] {name} | Liq: ${liq_val:,.0f} | Mcap: ${mcap_val:,.0f}")
                                         tokens.append({"name": name, "address": address})
+                                    else:
+                                        # DEBUG : Voir pourquoi le token est rejeté (Profil)
+                                        name = text_parts[1] if len(text_parts) > 1 else "Unknown"
+                                        print(f"    -> [REJETÉ Profil] {name} (1-7j, bonnes finances, mais pas de Twitter/Website)")
+                                else:
+                                    # DEBUG : Voir pourquoi le token est rejeté (Finances)
+                                    name = text_parts[1] if len(text_parts) > 1 else "Unknown"
+                                    print(f"    -> [REJETÉ Finance] {name} | Liq: ${liq_val:,.0f} | Mcap: ${mcap_val:,.0f}")
             except:
                 continue
                 
@@ -113,7 +120,8 @@ async def get_new_solana_tokens(page):
             stable_scrolls = 0
         last_count = len(seen_addresses)
         
-        await page.evaluate("window.scrollBy(0, 2000)")
+        # Descendre tout en bas de la page pour forcer le chargement
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         await asyncio.sleep(1.5)
 
     print(f"[+] Total tokens uniques vus: {len(seen_addresses)}")
