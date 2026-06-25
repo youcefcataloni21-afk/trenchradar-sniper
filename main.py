@@ -7,18 +7,6 @@ import re
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-SCORE_THRESHOLD = 75
-
-async def send_telegram_message(message):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
-    try:
-        requests.post(url, json=payload, timeout=10)
-        print("[+] Message Telegram envoyé.")
-    except:
-        pass
 
 def parse_dollar_value(val_str):
     try:
@@ -51,7 +39,6 @@ async def get_new_solana_tokens(page):
     try:
         await page.wait_for_selector("a[href*='/solana/']", timeout=20000)
     except:
-        print("[-] DexScreener bloqué ou layout changé.")
         return []
 
     all_links = await page.query_selector_all("a[href*='/solana/']")
@@ -83,79 +70,14 @@ async def get_new_solana_tokens(page):
                     
                     if liq_val >= 20000 and mcap_val >= 100000:
                         name = text_parts[1] if len(text_parts) > 1 else "Unknown"
-                        print(f"    -> [GARDÉ >24h] {name} | Liq: ${liq_val:,.0f} | Mcap: ${mcap_val:,.0f}")
                         tokens.append({"name": name, "address": address})
-                        if len(tokens) >= 15:
+                        if len(tokens) >= 1: # Juste 1 pour le test
                             break 
         except:
             continue
     return tokens
 
-async def get_trenchradar_score(page, address: str) -> int:
-    """
-    Navigates to TrenchRadar, searches for a token address, and extracts the Trust Score.
-    Requires an active Playwright Page object.
-    """
-    print(f"[*] Checking TrenchRadar for {address[:8]}...")
-    url = "https://www.trenchradar.net/app?chain=solana"
-    
-    try:
-        # 1. Go to TrenchRadar
-        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        
-        # 2. Find the search bar
-        search_input = await page.wait_for_selector(
-            "input[type='text'], input[type='search'], input[placeholder*='search' i], input[placeholder*='address' i]",
-            timeout=15000
-        )
-        
-        if search_input:
-            # 3. Type the address and hit Enter
-            await search_input.fill(address)
-            await page.keyboard.press("Enter")
-            
-            # 4. Wait for the page to calculate and display the score
-            print("    -> Waiting for TrenchRadar to calculate score...")
-            try:
-                await page.wait_for_function(
-                    """() => document.body.innerText.includes('Trust Score')""",
-                    timeout=30000 # Waits up to 30 seconds for the text to appear
-                )
-            except Exception:
-                print("    -> 'Trust Score' text did not appear in time.")
-                return 0
-        else:
-            print("    -> Search bar not found.")
-            return 0
-            
-        # 5. Extract the text from the page
-        body_text = await page.evaluate("document.body.innerText")
-        
-        # 6. Use Regex to find the score (e.g., "35 \n Trust Score")
-        match = re.search(r'(\d{1,3})\s*\n*Trust Score', body_text, re.IGNORECASE)
-        if match:
-            score = int(match.group(1))
-            print(f"    -> Score found: {score}/100")
-            return score
-        else:
-            # Fallback just in case they change the layout to "35/100"
-            match_fallback = re.search(r'(\d{1,3})\s*/\s*100', body_text)
-            if match_fallback:
-                print(f"    -> Score (fallback) found: {match_fallback.group(1)}/100")
-                return int(match_fallback.group(1))
-                
-            print(f"    -> Score not found in page text.")
-            return 0
-            
-    except Exception as e:
-        print(f"    -> Error scraping TrenchRadar: {e}")
-        return 0
-
 async def main():
-    delay = random.uniform(1, 5)
-    print(f"[*] Waiting for {delay:.2f} seconds...")
-    await asyncio.sleep(delay)
-
     async with async_playwright() as p:
         # 1. Firefox pour DexScreener
         print("[*] Lancement de Firefox pour DexScreener...")
@@ -175,34 +97,58 @@ async def main():
             print("[-] Aucun token trouvé.")
             return
 
+        token = tokens[0]
+        print(f"[*] Test TrenchRadar pour {token['name']} ({token['address'][:8]}...)")
+
         # 2. Chromium pour TrenchRadar
-        print("[*] Lancement de Chromium pour TrenchRadar...")
         chr_browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
         chr_context = await chr_browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             viewport={'width': 1920, 'height': 1080},
             locale='en-US'
         )
-        tr_page = await chr_context.new_page()
+        page = await chr_context.new_page()
 
-        print("🤖 Agent starting up...")
-        
-        found_good_coin = False
-        for token in tokens:
-            score = await get_trenchradar_score(tr_page, token['address'])
-            if score >= SCORE_THRESHOLD:
-                found_good_coin = True
-                message = f"🚀 <b>High Score Token Trouvé !</b>\n\nName: <b>{token['name']}</b>\nAddress: <code>{token['address']}</code>\n\nRésultat: Trust Score >= 75/100 sur TrenchRadar"
-                await send_telegram_message(message)
+        try:
+            url = "https://www.trenchradar.net/app?chain=solana"
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             
-            # Petite pause entre chaque token pour ne pas surcharger TrenchRadar
-            await asyncio.sleep(3)
+            search_input = await page.wait_for_selector(
+                "input[type='text'], input[type='search'], input[placeholder*='search' i], input[placeholder*='address' i]",
+                timeout=15000
+            )
             
-        if not found_good_coin:
-            print("[-] Aucun token n'a eu un score >= 75 cette fois.")
+            if search_input:
+                await search_input.fill(token['address'])
+                await page.keyboard.press("Enter")
+                
+                print("    -> Waiting for TrenchRadar to calculate score...")
+                try:
+                    await page.wait_for_function(
+                        """() => document.body.innerText.includes('Trust Score')""",
+                        timeout=30000
+                    )
+                except:
+                    print("    -> 'Trust Score' text did not appear in time.")
+                    
+                # Lire le texte de la page
+                body_text = await page.evaluate("document.body.innerText")
+                
+                # NOUVEAU : Afficher 500 caractères autour de "Trust Score"
+                score_index = body_text.find("Trust Score")
+                if score_index != -1:
+                    print(f"\n--- CONTEXTE AUTOUR DE 'TRUST SCORE' ---")
+                    print(body_text[max(0, score_index-200):score_index+300])
+                    print("----------------------------------------\n")
+                else:
+                    print("\n--- TEXTE DE LA PAGE (1000 chars) ---")
+                    print(body_text[:1000])
+                    print("-------------------------------------\n")
+                
+        except Exception as e:
+            print(f"Error: {e}")
             
         await chr_browser.close()
-        print("✅ Agent finished task.")
 
 if __name__ == "__main__":
     asyncio.run(main())
