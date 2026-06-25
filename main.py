@@ -33,15 +33,13 @@ def parse_dollar_value(val_str):
         return 0
 
 def is_older_than_24h(row_text):
-    """Vérifie si le texte de la ligne contient un âge > 24h (ex: 1d, 2d, 5w, 25h)"""
-    # Cherche un nombre suivi de 'h' (heures), 'd' (jours), 'w' (semaines), 'y' (années)
     match = re.search(r'(\d+)\s*([hdwy])', row_text)
     if match:
         val = int(match.group(1))
         unit = match.group(2)
-        if unit in ('d', 'w', 'y'): # Si jours, semaines ou années, c'est > 24h
+        if unit in ('d', 'w', 'y'):
             return True
-        if unit == 'h' and val >= 24: # Si heures et >= 24
+        if unit == 'h' and val >= 24:
             return True
     return False
 
@@ -57,7 +55,6 @@ async def get_new_solana_tokens(page):
         return []
 
     all_links = await page.query_selector_all("a[href*='/solana/']")
-    
     token_rows = []
     for row in all_links:
         href = await row.get_attribute("href")
@@ -72,10 +69,8 @@ async def get_new_solana_tokens(page):
             href = await row.get_attribute("href")
             if href and "/solana/" in href:
                 address = href.split("/solana/")[1].split("?")[0]
-                
                 row_text = await row.inner_text()
                 
-                # FILTRE 24H : On ignore si le token a moins de 24h d'existence
                 if not is_older_than_24h(row_text):
                     continue
                     
@@ -96,60 +91,65 @@ async def get_new_solana_tokens(page):
             continue
     return tokens
 
-async def check_trenchradar(page, token):
-    print(f"[*] Vérification TrenchRadar pour {token['name']}...")
+async def get_trenchradar_score(page, address: str) -> int:
+    """
+    Navigates to TrenchRadar, searches for a token address, and extracts the Trust Score.
+    Requires an active Playwright Page object.
+    """
+    print(f"[*] Checking TrenchRadar for {address[:8]}...")
+    url = "https://www.trenchradar.net/app?chain=solana"
     
-    captured_score = None
-    
-    # Intercepter l'API de TrenchRadar (au cas où le score vient d'une API)
-    async def handle_response(response):
-        nonlocal captured_score
-        if response.request.resource_type in ["xhr", "fetch"]:
-            try:
-                body = await response.text()
-                # Cherche un score dans l'API (ex: "score": 80)
-                match = re.search(r'"score":\s*"?(\d{1,3})"?', body)
-                if match:
-                    captured_score = int(match.group(1))
-            except:
-                pass
-
-    page.on("response", handle_response)
-
     try:
-        # URL supposée de TrenchRadar pour Solana
-        url = f"https://trenchradar.com/token/solana/{token['address']}"
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        await asyncio.sleep(5) # Laisser le temps à la page de charger
+        # 1. Go to TrenchRadar
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
         
-        # Si l'API n'a pas été interceptée, on lit le texte de la page
-        if captured_score is None:
-            body_text = await page.evaluate("document.body.innerText")
-            # Cherche "75/100" ou juste un nombre près du mot "Score"
-            match = re.search(r'(\d{1,3})\s*/\s*100', body_text)
-            if match:
-                captured_score = int(match.group(1))
-            else:
-                match = re.search(r'Score\s*:?\s*(\d{1,3})', body_text, re.IGNORECASE)
-                if match:
-                    captured_score = int(match.group(1))
+        # 2. Find the search bar
+        search_input = await page.wait_for_selector(
+            "input[type='text'], input[type='search'], input[placeholder*='search' i], input[placeholder*='address' i]",
+            timeout=15000
+        )
         
-        page.remove_listener("response", handle_response)
-        
-        if captured_score is not None:
-            print(f"    -> Score TrenchRadar capturé: {captured_score}/100")
-            # RÈGLE : Si le score est >= 75/100
-            if captured_score >= SCORE_THRESHOLD:
-                return True
-            else:
-                return False
+        if search_input:
+            # 3. Type the address and hit Enter
+            await search_input.fill(address)
+            await page.keyboard.press("Enter")
+            
+            # 4. Wait for the page to calculate and display the score
+            print("    -> Waiting for TrenchRadar to calculate score...")
+            try:
+                await page.wait_for_function(
+                    """() => document.body.innerText.includes('Trust Score')""",
+                    timeout=30000 # Waits up to 30 seconds for the text to appear
+                )
+            except Exception:
+                print("    -> 'Trust Score' text did not appear in time.")
+                return 0
         else:
-            print("    -> Score non trouvé sur TrenchRadar pour ce token.")
-            return False
+            print("    -> Search bar not found.")
+            return 0
+            
+        # 5. Extract the text from the page
+        body_text = await page.evaluate("document.body.innerText")
+        
+        # 6. Use Regex to find the score (e.g., "35 \n Trust Score")
+        match = re.search(r'(\d{1,3})\s*\n*Trust Score', body_text, re.IGNORECASE)
+        if match:
+            score = int(match.group(1))
+            print(f"    -> Score found: {score}/100")
+            return score
+        else:
+            # Fallback just in case they change the layout to "35/100"
+            match_fallback = re.search(r'(\d{1,3})\s*/\s*100', body_text)
+            if match_fallback:
+                print(f"    -> Score (fallback) found: {match_fallback.group(1)}/100")
+                return int(match_fallback.group(1))
+                
+            print(f"    -> Score not found in page text.")
+            return 0
             
     except Exception as e:
-        page.remove_listener("response", handle_response)
-        return False
+        print(f"    -> Error scraping TrenchRadar: {e}")
+        return 0
 
 async def main():
     delay = random.uniform(1, 5)
@@ -189,12 +189,14 @@ async def main():
         
         found_good_coin = False
         for token in tokens:
-            is_safe = await check_trenchradar(tr_page, token)
-            if is_safe:
+            score = await get_trenchradar_score(tr_page, token['address'])
+            if score >= SCORE_THRESHOLD:
                 found_good_coin = True
-                message = f"🚀 <b>High Score Token Trouvé !</b>\n\nName: <b>{token['name']}</b>\nAddress: <code>{token['address']}</code>\n\nRésultat: Score >= 75/100 sur TrenchRadar"
+                message = f"🚀 <b>High Score Token Trouvé !</b>\n\nName: <b>{token['name']}</b>\nAddress: <code>{token['address']}</code>\n\nRésultat: Trust Score >= 75/100 sur TrenchRadar"
                 await send_telegram_message(message)
-            await asyncio.sleep(2)
+            
+            # Petite pause entre chaque token pour ne pas surcharger TrenchRadar
+            await asyncio.sleep(3)
             
         if not found_good_coin:
             print("[-] Aucun token n'a eu un score >= 75 cette fois.")
