@@ -2,7 +2,6 @@ name: TrenchRadar Sniper Agent
 
 on:
   schedule:
-    # Runs every 60 minutes
     - cron: "0 * * * *"
   workflow_dispatch:
 
@@ -28,3 +27,11 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python main.py
+
+      - name: Upload Screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: dex-screenshots
+          path: |
+            filters_menu.png
+            dex_page.png
