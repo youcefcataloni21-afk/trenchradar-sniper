@@ -2,7 +2,8 @@ name: TrenchRadar Sniper Agent
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    # Runs every 2 hours
+    - cron: "0 */2 * * *"
   workflow_dispatch:
 
 jobs:
@@ -17,21 +18,15 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install dependencies
+      - name: Install dependencies and Xvfb
         run: |
           pip install playwright requests
           playwright install --with-deps
+          sudo apt-get update
+          sudo apt-get install -y xvfb
 
-      - name: Run AI Agent
+      - name: Run AI Agent with virtual screen
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python main.py
-
-      - name: Upload Screenshots
-        uses: actions/upload-artifact@v4
-        with:
-          name: dex-screenshots
-          path: |
-            filters_menu.png
-            dex_page.png
+        run: xvfb-run python main.py
